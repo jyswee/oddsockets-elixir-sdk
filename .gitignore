@@ -1,0 +1,8 @@
+_build/
+deps/
+.elixir_ls/
+*.beam
+*.ez
+.DS_Store
+*.log
+JAVASCRIPT_PATTERN_COMPLIANCE.md
