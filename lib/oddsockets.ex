@@ -51,7 +51,7 @@ defmodule OddSockets do
 
   @max_reconnect_attempts 5
   @initial_reconnect_delay 1000
-  @manager_url "https://manager1.oddsockets.tyga.network"
+  @manager_url "https://connect.oddsockets.tyga.network"
 
   ## Public API
 

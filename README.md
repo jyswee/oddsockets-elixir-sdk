@@ -207,7 +207,7 @@ You can set default configuration using environment variables:
 
 ```bash
 export ODDSOCKETS_API_KEY="your-api-key"
-export ODDSOCKETS_MANAGER_URL="https://manager1.oddsockets.tyga.network"
+export ODDSOCKETS_MANAGER_URL="https://connect.oddsockets.tyga.network"
 ```
 
 ### Application Configuration
@@ -217,7 +217,7 @@ Configure in your `config/config.exs`:
 ```elixir
 config :oddsockets,
   api_key: "your-api-key",
-  manager_url: "https://manager1.oddsockets.tyga.network"
+  manager_url: "https://connect.oddsockets.tyga.network"
 ```
 
 ## Error Handling

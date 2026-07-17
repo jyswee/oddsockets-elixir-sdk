@@ -6,7 +6,7 @@ defmodule OddSockets.ManagerDiscovery do
   all routing and load balancing transparently.
   """
 
-  @manager_url "https://manager1.oddsockets.tyga.network"
+  @manager_url "https://connect.oddsockets.tyga.network"
 
   @doc """
   Get the manager URL (always returns the main endpoint).
@@ -22,7 +22,7 @@ defmodule OddSockets.ManagerDiscovery do
   ## Examples
 
       iex> OddSockets.ManagerDiscovery.discover_manager_url("your-api-key")
-      "https://manager1.oddsockets.tyga.network"
+      "https://connect.oddsockets.tyga.network"
 
   """
   @spec discover_manager_url(String.t()) :: String.t()
