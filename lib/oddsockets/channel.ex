@@ -343,66 +343,77 @@ defmodule OddSockets.Channel do
   end
 
   defp send_subscribe_request(state) do
-    # Mock implementation - in a real implementation, this would
-    # send a WebSocket message to the worker
-    Logger.info("Subscribing to channel: #{state.name}")
-    :ok
+    payload = %{
+      "channel" => state.name,
+      "options" => worker_subscribe_options(state.options)
+    }
+
+    case OddSockets.send_event(state.client, "subscribed", state.name, "subscribe", payload) do
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp send_unsubscribe_request(state) do
-    # Mock implementation
-    Logger.info("Unsubscribing from channel: #{state.name}")
-    :ok
+    payload = %{"channel" => state.name}
+
+    case OddSockets.send_event(state.client, "unsubscribed", state.name, "unsubscribe", payload) do
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp send_publish_request(message, options, state) do
-    # Mock implementation
-    Logger.info("Publishing to channel #{state.name}: #{inspect(message)}")
-    
-    result = %{
-      channel: state.name,
-      message_id: generate_message_id(),
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
-      options: options
+    payload = %{
+      "channel" => state.name,
+      "message" => message,
+      "options" => worker_publish_options(options)
     }
-    
-    {:ok, result}
+
+    OddSockets.send_event(state.client, "published", state.name, "publish", payload)
   end
 
   defp send_history_request(options, state) do
-    # Mock implementation
-    count = Map.get(options, :count, 50)
-    Logger.info("Requesting #{count} history messages for channel: #{state.name}")
-    
-    # Return cached history for now
-    messages = Enum.take(state.message_history, count)
-    {:ok, messages}
+    payload = %{
+      "channel" => state.name,
+      "options" => %{"count" => Map.get(options, :count, 50)}
+    }
+
+    case OddSockets.send_event(state.client, "history", state.name, "get_history", payload) do
+      {:ok, %{"messages" => messages}} -> {:ok, messages}
+      {:ok, result} -> {:ok, Map.get(result, "messages", [])}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp send_presence_request(state) do
-    # Mock implementation
-    Logger.info("Requesting presence for channel: #{state.name}")
-    
-    presence_data = %{
-      channel: state.name,
-      occupants: Map.values(state.presence),
-      count: map_size(state.presence)
-    }
-    
-    {:ok, presence_data}
+    payload = %{"channel" => state.name}
+    OddSockets.send_event(state.client, "presence", state.name, "get_presence", payload)
   end
 
   defp send_state_update_request(user_state, state) do
-    # Mock implementation
-    Logger.info("Updating state for channel #{state.name}: #{inspect(user_state)}")
-    
-    result = %{
-      channel: state.name,
-      state: user_state,
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    payload = %{"channel" => state.name, "state" => user_state}
+    OddSockets.send_event(state.client, "state_updated", state.name, "update_state", payload)
+  end
+
+  # Worker options are read camelCase; only forward keys the caller set.
+  defp worker_subscribe_options(options) do
+    %{
+      "enablePresence" => Map.get(options, :enable_presence),
+      "maxHistory" => Map.get(options, :max_history),
+      "retainHistory" => Map.get(options, :retain_history)
     }
-    
-    {:ok, result}
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp worker_publish_options(options) do
+    %{
+      "ttl" => Map.get(options, :ttl),
+      "metadata" => Map.get(options, :metadata)
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
   end
 
   defp handle_websocket_message(%{"type" => "message"} = data, state) do
@@ -460,10 +471,5 @@ defmodule OddSockets.Channel do
   defp handle_websocket_message(_data, state) do
     # Ignore unknown message types
     state
-  end
-
-  defp generate_message_id do
-    :crypto.strong_rand_bytes(16)
-    |> Base.encode16(case: :lower)
   end
 end

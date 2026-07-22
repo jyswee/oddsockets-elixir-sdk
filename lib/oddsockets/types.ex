@@ -90,3 +90,4 @@ defmodule OddSockets.Types do
           | {:reconnecting, reconnect_info()}
           | {:worker_assigned, worker_assignment()}
           | :max_reconnect_attempts_reached
+end

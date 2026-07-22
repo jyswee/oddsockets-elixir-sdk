@@ -40,8 +40,8 @@ defmodule OddSockets.MixProject do
 
   defp deps do
     [
-      # WebSocket client
-      {:websocket_client, "~> 1.5"},
+      # WebSocket client (Socket.IO / Engine.IO framing is implemented on top)
+      {:websockex, "~> 0.4.3"},
       # HTTP client
       {:httpoison, "~> 2.0"},
       # JSON handling

@@ -1,0 +1,10 @@
+.git
+_build
+deps
+demo/_build
+demo/deps
+doc
+docs
+cover
+*.ez
+.elixir_ls
