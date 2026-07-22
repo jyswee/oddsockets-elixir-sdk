@@ -1,0 +1,28 @@
+# OddSockets Elixir SDK - live two-client round-trip PROOF
+#
+# Captured 2026-07-22T01:18:39Z against the LIVE OddSockets platform.
+# Built and run straight from the SDK sources via demo/Dockerfile:
+#
+#   docker build -f demo/Dockerfile -t oddsockets-elixir-demo .
+#   docker run --rm -e ODDSOCKETS_API_KEY=ak_your_key_here oddsockets-elixir-demo
+#
+# TWO independent clients (subscriber alice + publisher bob) on separate
+# connections. alice receiving bob's uniquely-nonced message can ONLY have
+# travelled through the OddSockets worker - it is not a local echo. API key
+# is redacted below; everything else is the verbatim run.
+#
+# Transport: genuine Socket.IO (Engine.IO v4) over WebSocket (WebSockex) to the
+# worker; request/response events correlated per channel.
+#
+# Process exit code: 0 (0 = cross-client round-trip verified)
+
+[connect] connecting both clients...
+[alice] worker w002-oddsockets-1
+[bob]   worker w002-oddsockets-1
+[connect] alice = connected, bob = connected
+[alice] subscribed to demo-610597 (presence on)
+[bob] published, messageId = 36401ebb-c78a-4617-aa0c-1cf45cdfc403
+[alice] received bob's message (nonce matched) - real round-trip.
+[alice] presence: 1 user(s).
+[alice] unsubscribed.
+OK - cross-client round-trip verified

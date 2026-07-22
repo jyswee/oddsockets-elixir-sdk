@@ -37,6 +37,7 @@ defmodule OddSockets do
   @type state :: %{
           config: config(),
           socket: pid() | nil,
+          socket_ref: reference() | nil,
           worker_url: String.t() | nil,
           worker_id: String.t() | nil,
           channels: %{String.t() => pid()},
@@ -46,7 +47,12 @@ defmodule OddSockets do
           reconnect_delay: non_neg_integer(),
           client_identifier: String.t(),
           session_info: map() | nil,
-          subscribers: [pid()]
+          subscribers: [pid()],
+          pending: %{String.t() => GenServer.from()},
+          connect_from: GenServer.from() | nil,
+          connect_timer: reference() | nil,
+          assignment: map() | nil,
+          intentional_disconnect: boolean()
         }
 
   @max_reconnect_attempts 5
@@ -179,6 +185,18 @@ defmodule OddSockets do
     GenServer.call(client, {:unsubscribe_events, self()})
   end
 
+  @doc false
+  # Sends a Socket.IO event and waits for the correlated worker response.
+  #
+  # `response_event` is the event the worker replies with (e.g. "subscribed"
+  # for a "subscribe" request); the reply is matched on
+  # `"<response_event>:<channel>"`. Used by `OddSockets.Channel`.
+  @spec send_event(pid(), String.t(), String.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def send_event(client, response_event, channel, event, payload) do
+    GenServer.call(client, {:send_event, response_event, channel, event, payload}, 15_000)
+  end
+
   ## GenServer Callbacks
 
   @impl true
@@ -186,6 +204,7 @@ defmodule OddSockets do
     state = %{
       config: config,
       socket: nil,
+      socket_ref: nil,
       worker_url: nil,
       worker_id: nil,
       channels: %{},
@@ -195,7 +214,12 @@ defmodule OddSockets do
       reconnect_delay: @initial_reconnect_delay,
       client_identifier: generate_client_identifier(config),
       session_info: nil,
-      subscribers: []
+      subscribers: [],
+      pending: %{},
+      connect_from: nil,
+      connect_timer: nil,
+      assignment: nil,
+      intentional_disconnect: false
     }
 
     # Auto-connect by default
@@ -207,23 +231,43 @@ defmodule OddSockets do
   end
 
   @impl true
-  def handle_call(:connect, _from, %{connection_state: state} = s) 
+  def handle_call(:connect, _from, %{connection_state: state} = s)
       when state in [:connecting, :connected] do
     {:reply, :ok, s}
   end
 
-  def handle_call(:connect, _from, state) do
-    case do_connect(state) do
+  def handle_call(:connect, from, state) do
+    case start_connection(%{state | connect_from: from}) do
       {:ok, new_state} ->
-        {:reply, :ok, new_state}
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        # Reply is deferred until the Socket.IO handshake completes.
+        {:noreply, new_state}
+
+      {:error, reason, new_state} ->
+        {:reply, {:error, reason}, %{new_state | connect_from: nil}}
     end
   end
 
   def handle_call(:disconnect, _from, state) do
     new_state = do_disconnect(state)
     {:reply, :ok, new_state}
+  end
+
+  def handle_call({:send_event, response_event, channel, event, payload}, from, state) do
+    if state.connection_state != :connected or is_nil(state.socket) do
+      {:reply, {:error, :not_connected}, state}
+    else
+      key = "#{response_event}:#{channel}"
+      frame = "42" <> Jason.encode!([event, prune_nils(payload)])
+
+      case OddSockets.Socket.push(state.socket, frame) do
+        :ok ->
+          Process.send_after(self(), {:event_timeout, key}, 10_000)
+          {:noreply, %{state | pending: Map.put(state.pending, key, from)}}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    end
   end
 
   def handle_call({:channel, channel_name}, _from, state) do
@@ -283,14 +327,18 @@ defmodule OddSockets do
   end
 
   @impl true
+  def handle_info(:connect, %{connection_state: cs} = state)
+      when cs in [:connecting, :connected] do
+    {:noreply, state}
+  end
+
   def handle_info(:connect, state) do
-    case do_connect(state) do
+    case start_connection(state) do
       {:ok, new_state} ->
         {:noreply, new_state}
-      {:error, _reason} ->
-        # Schedule reconnect
-        new_state = schedule_reconnect(state)
-        {:noreply, new_state}
+
+      {:error, _reason, new_state} ->
+        {:noreply, schedule_reconnect(new_state)}
     end
   end
 
@@ -299,27 +347,96 @@ defmodule OddSockets do
     {:noreply, state}
   end
 
-  def handle_info({:websocket_message, message}, state) do
-    handle_websocket_message(message, state)
-    {:noreply, state}
+  # Socket.IO handshake completed: the transport is live.
+  def handle_info({:socket_connected, _socket}, state) do
+    if state.connect_timer, do: Process.cancel_timer(state.connect_timer)
+
+    new_state = %{
+      state
+      | connection_state: :connected,
+        reconnect_attempts: 0,
+        reconnect_delay: @initial_reconnect_delay,
+        connect_timer: nil
+    }
+
+    broadcast_event(:connected, new_state)
+
+    if state.assignment do
+      broadcast_event(:worker_assigned, state.assignment, new_state)
+    end
+
+    if state.connect_from, do: GenServer.reply(state.connect_from, :ok)
+
+    {:noreply, %{new_state | connect_from: nil}}
   end
 
-  def handle_info({:websocket_closed, _reason}, state) do
-    new_state = %{state | connection_state: :disconnected, socket: nil}
-    broadcast_event(:disconnected, new_state)
-    
-    # Auto-reconnect unless manually disconnected
-    new_state = schedule_reconnect(new_state)
-    {:noreply, new_state}
+  # Socket.IO CONNECT_ERROR during the handshake.
+  def handle_info({:socket_error, raw}, state) do
+    if state.connect_timer, do: Process.cancel_timer(state.connect_timer)
+    reason = {:connect_error, raw}
+    broadcast_event(:error, reason, state)
+
+    if state.connect_from, do: GenServer.reply(state.connect_from, {:error, reason})
+
+    {:noreply, %{state | connection_state: :disconnected, connect_from: nil, connect_timer: nil}}
+  end
+
+  # A decoded Socket.IO event from the worker.
+  def handle_info({:socket_event, event, payload}, state) do
+    {:noreply, dispatch_worker_event(event, payload, state)}
+  end
+
+  def handle_info({:socket_closed, socket}, state) do
+    if socket == state.socket and not state.intentional_disconnect do
+      new_state = %{state | connection_state: :disconnected, socket: nil}
+      broadcast_event(:disconnected, new_state)
+      {:noreply, schedule_reconnect(new_state)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(:connect_timeout, state) do
+    if state.connection_state == :connecting and state.connect_from do
+      GenServer.reply(state.connect_from, {:error, :connect_timeout})
+
+      if state.socket, do: OddSockets.Socket.close(state.socket)
+
+      {:noreply, %{state | connection_state: :disconnected, connect_from: nil, connect_timer: nil, socket: nil}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:event_timeout, key}, state) do
+    case Map.pop(state.pending, key) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {from, rest} ->
+        GenServer.reply(from, {:error, :timeout})
+        {:noreply, %{state | pending: rest}}
+    end
+  end
+
+  # Socket process went down.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{socket_ref: ref} = state) do
+    if state.intentional_disconnect do
+      {:noreply, %{state | socket: nil, socket_ref: nil}}
+    else
+      new_state = %{state | connection_state: :disconnected, socket: nil, socket_ref: nil}
+      broadcast_event(:disconnected, new_state)
+      {:noreply, schedule_reconnect(new_state)}
+    end
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     # Remove dead channel processes
-    new_channels = 
+    new_channels =
       state.channels
       |> Enum.reject(fn {_name, channel_pid} -> channel_pid == pid end)
       |> Map.new()
-    
+
     {:noreply, %{state | channels: new_channels}}
   end
 
@@ -336,48 +453,76 @@ defmodule OddSockets do
     }
   end
 
-  defp do_connect(state) do
-    state = %{state | connection_state: :connecting}
+  # Discovers a worker, opens the Socket.IO transport, and arms a handshake
+  # timeout. The caller's reply (for an explicit `connect/1`) is deferred until
+  # `{:socket_connected, _}` arrives.
+  defp start_connection(state) do
+    state = %{state | connection_state: :connecting, intentional_disconnect: false}
     broadcast_event(:connecting, state)
 
-    with {:ok, worker_assignment} <- get_worker_assignment(state),
-         {:ok, socket} <- connect_to_worker(worker_assignment, state) do
-      
-      new_state = %{state |
-        connection_state: :connected,
-        socket: socket,
-        worker_url: worker_assignment.url,
-        worker_id: worker_assignment.worker_id,
-        session_info: worker_assignment.session,
-        reconnect_attempts: 0,
-        reconnect_delay: @initial_reconnect_delay
+    with {:ok, assignment} <- get_worker_assignment(state),
+         ws_url = build_ws_url(assignment.url),
+         {:ok, socket} <-
+           OddSockets.Socket.start(ws_url, %{
+             owner: self(),
+             api_key: state.config.api_key,
+             user_id: state.config.user_id || state.client_identifier
+           }) do
+      ref = Process.monitor(socket)
+      timer = Process.send_after(self(), :connect_timeout, 15_000)
+
+      new_state = %{
+        state
+        | socket: socket,
+          socket_ref: ref,
+          worker_url: assignment.url,
+          worker_id: assignment.worker_id,
+          session_info: assignment.session,
+          assignment: assignment,
+          connect_timer: timer
       }
-      
-      broadcast_event(:connected, new_state)
-      broadcast_event(:worker_assigned, worker_assignment, new_state)
-      
+
       {:ok, new_state}
     else
       {:error, reason} ->
         new_state = %{state | connection_state: :disconnected}
         broadcast_event(:error, reason, new_state)
-        {:error, reason}
+        {:error, reason, new_state}
     end
+  end
+
+  # Converts an http(s) worker URL into a Socket.IO WebSocket endpoint.
+  defp build_ws_url(url) do
+    base =
+      url
+      |> String.replace_prefix("https://", "wss://")
+      |> String.replace_prefix("http://", "ws://")
+      |> String.trim_trailing("/")
+
+    "#{base}/socket.io/?EIO=4&transport=websocket"
   end
 
   defp do_disconnect(state) do
     if state.socket do
-      # Close WebSocket connection
-      send(state.socket, :close)
+      OddSockets.Socket.close(state.socket)
     end
-    
-    new_state = %{state |
-      connection_state: :disconnected,
-      socket: nil,
-      worker_url: nil,
-      worker_id: nil
+
+    # Fail any in-flight requests so callers do not hang.
+    Enum.each(state.pending, fn {_key, from} ->
+      GenServer.reply(from, {:error, :disconnected})
+    end)
+
+    new_state = %{
+      state
+      | connection_state: :disconnected,
+        socket: nil,
+        socket_ref: nil,
+        worker_url: nil,
+        worker_id: nil,
+        pending: %{},
+        intentional_disconnect: true
     }
-    
+
     broadcast_event(:disconnected, new_state)
     new_state
   end
@@ -398,7 +543,7 @@ defmodule OddSockets do
       {"Content-Type", "application/json"}
     ]
     
-    case HTTPoison.get(url, headers, params: params, timeout: 10_000) do
+    case HTTPoison.get(url, headers, params: params, timeout: 10_000, recv_timeout: 10_000) do
       {:ok, %HTTPoison.Response{status_code: 200, body: body}} ->
         case Jason.decode(body) do
           {:ok, %{"url" => worker_url, "workerId" => worker_id} = response} ->
@@ -427,19 +572,123 @@ defmodule OddSockets do
     end
   end
 
-  defp connect_to_worker(assignment, state) do
-    # For now, return a mock socket - in a real implementation,
-    # this would establish a WebSocket connection
-    socket_pid = spawn_link(fn -> websocket_loop() end)
-    {:ok, socket_pid}
+  # Routes a decoded worker event to the correct place: `message` envelopes go
+  # to the owning channel; `error` fails an in-flight request; everything else
+  # is a correlated response to a pending request.
+  defp dispatch_worker_event("message", payload, state) do
+    route_message(payload, state)
+    state
   end
 
-  defp websocket_loop do
-    receive
-      :close -> :ok
-      _ -> websocket_loop()
+  defp dispatch_worker_event("error", payload, state) do
+    case take_any_pending(state) do
+      {nil, new_state} ->
+        broadcast_event(:error, extract_error(payload), new_state)
+        new_state
+
+      {from, new_state} ->
+        GenServer.reply(from, {:error, extract_error(payload)})
+        new_state
     end
   end
+
+  defp dispatch_worker_event(event, payload, state) do
+    channel = Map.get(payload, "channel")
+    key = "#{event}:#{channel}"
+
+    case Map.pop(state.pending, key) do
+      {nil, _} ->
+        state
+
+      {from, rest} ->
+        GenServer.reply(from, {:ok, adapt_response(event, payload)})
+        %{state | pending: rest}
+    end
+  end
+
+  # Delivers a worker message envelope to the subscribing channel process.
+  defp route_message(payload, state) do
+    channel_name = Map.get(payload, "channel")
+
+    case Map.get(state.channels, channel_name) do
+      nil ->
+        :ok
+
+      channel_pid ->
+        send(channel_pid, {:websocket_message, adapt_message(payload)})
+    end
+  end
+
+  # Worker message envelope -> the map channels/callbacks expect.
+  defp adapt_message(payload) do
+    inner = Map.get(payload, "message")
+
+    %{
+      "type" => "message",
+      "channel" => Map.get(payload, "channel"),
+      "id" => Map.get(payload, "id"),
+      "data" => inner,
+      "message" => inner,
+      "userId" => get_in(payload, ["publisher", "userId"]),
+      "timestamp" => Map.get(payload, "timestamp"),
+      "metadata" => Map.get(payload, "metadata")
+    }
+  end
+
+  defp adapt_response("presence", payload) do
+    occupants = Map.get(payload, "occupants", [])
+
+    %{
+      "channel" => Map.get(payload, "channel"),
+      "count" => Map.get(payload, "occupancy", length(occupants)),
+      "occupants" => occupants,
+      "users" => occupants
+    }
+  end
+
+  defp adapt_response("published", payload) do
+    %{
+      "channel" => Map.get(payload, "channel"),
+      "message_id" => Map.get(payload, "messageId"),
+      "messageId" => Map.get(payload, "messageId"),
+      "timestamp" => Map.get(payload, "timestamp"),
+      "subscriber_count" => Map.get(payload, "subscriberCount")
+    }
+  end
+
+  defp adapt_response("history", payload) do
+    %{
+      "channel" => Map.get(payload, "channel"),
+      "messages" => Map.get(payload, "messages", []),
+      "count" => Map.get(payload, "count", 0)
+    }
+  end
+
+  defp adapt_response(_event, payload), do: payload
+
+  defp extract_error(%{"message" => message}), do: message
+  defp extract_error(%{"type" => type}), do: type
+  defp extract_error(other), do: inspect(other)
+
+  # Pops an arbitrary pending waiter (worker error events carry no correlation
+  # id, so the earliest in-flight request is failed).
+  defp take_any_pending(state) do
+    case Enum.take(state.pending, 1) do
+      [{key, from}] -> {from, %{state | pending: Map.delete(state.pending, key)}}
+      [] -> {nil, state}
+    end
+  end
+
+  # Drops keys whose value is nil so the worker never receives JSON null where
+  # it destructures with an object default (which would crash its handler).
+  defp prune_nils(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Enum.map(fn {k, v} -> {k, prune_nils(v)} end)
+    |> Map.new()
+  end
+
+  defp prune_nils(value), do: value
 
   defp schedule_reconnect(state) do
     if state.reconnect_attempts < state.max_reconnect_attempts do
@@ -486,20 +735,6 @@ defmodule OddSockets do
     rescue
       e in Error ->
         %{success: false, error: e.message}
-    end
-  end
-
-  defp handle_websocket_message(message, state) do
-    # Forward WebSocket messages to appropriate channels
-    case Jason.decode(message) do
-      {:ok, %{"channel" => channel_name} = data} ->
-        case Map.get(state.channels, channel_name) do
-          nil -> :ok
-          channel_pid -> send(channel_pid, {:websocket_message, data})
-        end
-      
-      {:error, _} ->
-        Logger.warning("Failed to decode WebSocket message: #{inspect(message)}")
     end
   end
 
