@@ -49,6 +49,7 @@ defmodule OddSockets do
           session_info: map() | nil,
           subscribers: [pid()],
           pending: %{String.t() => GenServer.from()},
+          listeners: %{String.t() => [function()]},
           connect_from: GenServer.from() | nil,
           connect_timer: reference() | nil,
           assignment: map() | nil,
@@ -197,6 +198,31 @@ defmodule OddSockets do
     GenServer.call(client, {:send_event, response_event, channel, event, payload}, 15_000)
   end
 
+  @doc """
+  Emit a fire-and-forget Socket.IO event to the worker.
+
+  Used by `OddSockets.EnhancedFeatures` for enhanced (Slack-like) actions such
+  as `start_typing`, `add_reaction`, `set_status`. The event is framed as a
+  Socket.IO EVENT (`42["event", payload]`) and sent over the live connection.
+  """
+  @spec emit(pid(), String.t(), map()) :: :ok | {:error, term()}
+  def emit(client, event, payload \\ %{}) do
+    GenServer.call(client, {:emit, event, payload})
+  end
+
+  @doc """
+  Register a one-shot listener for a worker broadcast event.
+
+  The callback fires the next time `event` arrives from the worker and is then
+  removed. Used by `OddSockets.EnhancedFeatures` to await a correlated response
+  (e.g. `thread_data`, `message_reactions`). Enhanced broadcasts also surface on
+  processes registered via `subscribe_events/1`.
+  """
+  @spec once(pid(), String.t(), (map() -> any())) :: :ok
+  def once(client, event, callback) when is_function(callback, 1) do
+    GenServer.call(client, {:once, event, callback})
+  end
+
   ## GenServer Callbacks
 
   @impl true
@@ -216,6 +242,7 @@ defmodule OddSockets do
       session_info: nil,
       subscribers: [],
       pending: %{},
+      listeners: %{},
       connect_from: nil,
       connect_timer: nil,
       assignment: nil,
@@ -268,6 +295,25 @@ defmodule OddSockets do
           {:reply, {:error, reason}, state}
       end
     end
+  end
+
+  def handle_call({:emit, event, payload}, _from, state) do
+    if state.connection_state != :connected or is_nil(state.socket) do
+      {:reply, {:error, :not_connected}, state}
+    else
+      frame = "42" <> Jason.encode!([event, prune_nils(payload)])
+
+      case OddSockets.Socket.push(state.socket, frame) do
+        :ok -> {:reply, :ok, state}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    end
+  end
+
+  def handle_call({:once, event, callback}, _from, state) do
+    existing = Map.get(state.listeners, event, [])
+    new_listeners = Map.put(state.listeners, event, existing ++ [callback])
+    {:reply, :ok, %{state | listeners: new_listeners}}
   end
 
   def handle_call({:channel, channel_name}, _from, state) do
@@ -598,12 +644,33 @@ defmodule OddSockets do
 
     case Map.pop(state.pending, key) do
       {nil, _} ->
-        state
+        # Not a correlated channel response - treat as an enhanced (Slack-like)
+        # broadcast: user_typing, reaction_added, thread_reply, notifications,
+        # etc. Fire any one-shot `once/3` listeners and surface it on the public
+        # event stream for `subscribe_events/1` consumers.
+        deliver_broadcast(event, payload, state)
 
       {from, rest} ->
         GenServer.reply(from, {:ok, adapt_response(event, payload)})
         %{state | pending: rest}
     end
+  end
+
+  # Delivers an enhanced broadcast to registered one-shot listeners and event
+  # subscribers. Listeners for the event are invoked once and then removed.
+  defp deliver_broadcast(event, payload, state) do
+    {callbacks, remaining} = Map.pop(state.listeners, event, [])
+
+    Enum.each(callbacks, fn callback ->
+      try do
+        callback.(payload)
+      rescue
+        e -> Logger.warning("OddSockets once/3 listener for #{event} raised: #{inspect(e)}")
+      end
+    end)
+
+    broadcast_event(event, payload, state)
+    %{state | listeners: remaining}
   end
 
   # Delivers a worker message envelope to the subscribing channel process.
