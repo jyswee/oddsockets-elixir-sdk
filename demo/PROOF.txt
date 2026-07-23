@@ -26,3 +26,28 @@
 [alice] presence: 1 user(s).
 [alice] unsubscribed.
 OK - cross-client round-trip verified
+
+
+# OddSockets Elixir SDK - enhanced-events receive-path PROOF
+#
+# Captured 2026-07-23T11:40:00Z against the LIVE OddSockets platform.
+#   docker build -f demo/Dockerfile -t oddsockets-elixir-enh .
+#   docker run --rm -e ODDSOCKETS_API_KEY=ak_... oddsockets-elixir-enh \
+#     mix run -e "OddSocketsEnhancedRegress.run()"
+#
+# bob fires enhanced (Slack-like) actions; because alice is on a SEPARATE
+# connection, the broadcasts reaching alice's public event stream can only have
+# travelled through the worker. No mocks, no local echo.
+#
+# Process exit code: 0
+
+[connect] connecting both clients...
+[alice] worker w002-oddsockets-1
+[bob]   worker w002-oddsockets-1
+[connect] alice = connected, bob = connected
+[both] subscribed to enh-b4b0f1d4a0
+[bob] EnhancedFeatures.start_typing(bob) ...
+[bob] published messageId=070c4920-2100-4832-a1d9-e3a1aba75625, EnhancedFeatures.add_reaction :thumbsup: ...
+[alice] received 'user_typing' from bob (channel enh-b4b0f1d4a0) - broadcast round-trip.
+[alice] received 'reaction_added' (:thumbsup:) from bob - broadcast round-trip.
+OK - enhanced broadcast receive-path verified (user_typing + reaction_added)
