@@ -691,6 +691,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a href="#enhanced" class="nav-link">
+                            <i class="fas fa-bolt nav-icon"></i>
+                            Enhanced Features
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a href="#performance" class="nav-link">
                             <i class="fas fa-chart-line nav-icon"></i>
                             Performance
@@ -839,7 +845,7 @@ end</code></pre>
                         </div>
                         <pre><code class="language-elixir">def deps do
   [
-    {:oddsockets, git: "https://github.com/oddsockets/elixir-sdk.git"}
+    {:oddsockets, git: "https://github.com/jyswee/oddsockets-elixir-sdk.git"}
   ]
 end</code></pre>
                     </div>
@@ -1029,6 +1035,86 @@ config :oddsockets,
                         <p>Browse all available examples including GenServer patterns, Phoenix integration, and OTP supervision trees</p>
                     </a>
                 </div>
+            </section>
+
+            <section id="enhanced" class="section">
+                <h2 class="section-title">
+                    <i class="fas fa-bolt"></i>
+                    Enhanced Features
+                </h2>
+
+                <p>Beyond core pub/sub, OddSockets ships a Slack-like <strong>enhanced surface</strong>: typing indicators, reactions, threads, read receipts, presence/status, notifications, DMs, channel management, message editing and search. It lives in the <code>OddSockets.EnhancedFeatures</code> module. Actions are sent with a <code>OddSockets.EnhancedFeatures.*</code> function (the client pid is always the first argument) and the worker broadcasts back as events that surface on any process registered with <code>OddSockets.subscribe_events/1</code> — you match <code>{:oddsockets_event, {"&lt;event&gt;", payload}}</code> in your mailbox.</p>
+
+                <h3 class="section-subtitle">Typing &amp; Reactions</h3>
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="code-lang">elixir</span>
+                        <button class="code-copy" onclick="copyCode(this)">
+                            <i class="fas fa-copy"></i>
+                            Copy
+                        </button>
+                    </div>
+                    <pre><code class="language-elixir">alias OddSockets.EnhancedFeatures
+
+{:ok, client} = OddSockets.start_link(api_key: "YOUR_API_KEY", user_id: "alice")
+:ok = OddSockets.connect(client)
+
+# Enhanced broadcasts surface on the public event stream
+:ok = OddSockets.subscribe_events(client)
+
+channel = OddSockets.channel(client, "room-42")
+:ok = OddSockets.Channel.subscribe(channel, fn _msg -> :ok end, %{enable_presence: true})
+
+# Send-path: enhanced actions over the live socket (client pid first)
+:ok = EnhancedFeatures.start_typing(client, "alice", "room-42")
+:ok = EnhancedFeatures.add_reaction(client, "msg-1", "room-42", ":thumbsup:", "alice", "Alice")
+
+# Receive-path: broadcasts from other users on the channel
+receive do
+  {:oddsockets_event, {"user_typing", payload}} ->
+    IO.puts("#{payload["userId"]} is typing")
+
+  {:oddsockets_event, {"reaction_added", payload}} ->
+    IO.puts("#{payload["userId"]} reacted #{payload["emoji"]}")
+end</code></pre>
+                </div>
+
+                <h3 class="section-subtitle">Threads</h3>
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="code-lang">elixir</span>
+                        <button class="code-copy" onclick="copyCode(this)">
+                            <i class="fas fa-copy"></i>
+                            Copy
+                        </button>
+                    </div>
+                    <pre><code class="language-elixir"># Send a threaded reply
+:ok = EnhancedFeatures.thread_reply(client, "room-42", "msg-1", "Replying in the thread", "alice", "Alice")
+
+# Query functions block and return {:ok, data}
+{:ok, thread} = EnhancedFeatures.get_thread(client, "thread-1")
+
+# Receive the broadcast on the event stream
+receive do
+  {:oddsockets_event, {"thread_reply", _payload}} -> IO.puts("New reply")
+end</code></pre>
+                </div>
+
+                <h3 class="section-subtitle">Enhanced surface</h3>
+                <p>Each area exposes functions on <code>OddSockets.EnhancedFeatures</code>; the worker broadcasts the paired events which surface via <code>OddSockets.subscribe_events/1</code>. Query functions (<code>get_*</code>, <code>search_*</code>) block and return <code>{:ok, data}</code>.</p>
+                <ul>
+                    <li><strong>Typing</strong> &mdash; <code>start_typing</code>, <code>stop_typing</code> &rarr; <code>user_typing</code>, <code>user_stopped_typing</code></li>
+                    <li><strong>Reactions</strong> &mdash; <code>add_reaction</code>, <code>remove_reaction</code>, <code>get_reactions</code> &rarr; <code>reaction_added</code>, <code>reaction_removed</code></li>
+                    <li><strong>Threads</strong> &mdash; <code>thread_reply</code>, <code>get_thread</code>, <code>subscribe_thread</code>, <code>follow_thread</code>, <code>mark_thread_read</code> &rarr; <code>thread_reply</code>, <code>thread_subscribed</code>, <code>thread_followed</code>, <code>thread_read_updated</code></li>
+                    <li><strong>Read receipts</strong> &mdash; <code>mark_read</code>, <code>mark_all_read</code>, <code>get_unread_counts</code> &rarr; <code>user_read</code>, <code>unread_count_updated</code>, <code>all_marked_read</code></li>
+                    <li><strong>Messages</strong> &mdash; <code>edit_message</code>, <code>delete_message</code>, <code>pin_message</code>, <code>unpin_message</code>, <code>get_pinned_messages</code>, <code>search_messages</code> &rarr; <code>message_edited</code>, <code>message_deleted</code>, <code>message_pinned</code>, <code>message_unpinned</code></li>
+                    <li><strong>Presence &amp; status</strong> &mdash; <code>set_status</code>, <code>set_custom_status</code>, <code>set_dnd</code>, <code>get_user_presence</code> &rarr; <code>user_status_changed</code>, <code>custom_status_updated</code>, <code>dnd_status_changed</code></li>
+                    <li><strong>Channels</strong> &mdash; <code>create_channel</code>, <code>update_channel</code>, <code>archive_channel</code>, <code>invite_to_channel</code>, <code>join_channel</code>, <code>leave_channel</code> &rarr; <code>channel_created</code>, <code>channel_updated</code>, <code>user_invited</code>, <code>user_joined_channel</code>, <code>user_left_channel</code></li>
+                    <li><strong>DMs</strong> &mdash; <code>create_dm</code>, <code>send_dm</code>, <code>get_dm_conversations</code> &rarr; <code>dm_created</code>, <code>dm_received</code></li>
+                    <li><strong>Notifications</strong> &mdash; <code>subscribe_notifications</code>, <code>get_notifications</code>, <code>mark_notification_read</code>, <code>clear_notifications</code> &rarr; <code>notification</code>, <code>notification_read</code>, <code>notifications_cleared</code></li>
+                    <li><strong>Search</strong> &mdash; <code>search_messages</code>, <code>search_in_channel</code>, <code>search_by_user</code>, <code>filter_messages</code> &rarr; <code>{:ok, data}</code> results</li>
+                </ul>
+                <p>For any worker event not wrapped above, it still surfaces as <code>{:oddsockets_event, {"&lt;event&gt;", payload}}</code> once you have called <code>OddSockets.subscribe_events/1</code> &mdash; all enhanced broadcasts are forwarded to the event stream.</p>
             </section>
 
             <section id="performance" class="section">

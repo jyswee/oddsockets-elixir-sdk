@@ -199,6 +199,72 @@ Available events:
 - `{:worker_assigned, info}` - Worker assignment received
 - `:max_reconnect_attempts_reached` - Reconnection failed
 
+## Enhanced Features
+
+Beyond core pub/sub, OddSockets ships a Slack-like **enhanced surface** — reactions,
+typing indicators, threads, read receipts, presence/status, notifications, DMs,
+channel management, message editing and search. It lives in the
+`OddSockets.EnhancedFeatures` module. The pattern is always the same:
+
+1. **Send** an action with an `OddSockets.EnhancedFeatures.*` function (the client
+   pid is always the first argument).
+2. **Receive** the paired broadcast on your event stream: call
+   `OddSockets.subscribe_events(client)` once, then match
+   `{:oddsockets_event, {"<event>", payload}}` in your process mailbox.
+
+```elixir
+alias OddSockets.EnhancedFeatures
+
+{:ok, client} = OddSockets.start_link(api_key: "YOUR_API_KEY", user_id: "alice")
+:ok = OddSockets.connect(client)
+
+# Enhanced broadcasts surface on the public event stream
+:ok = OddSockets.subscribe_events(client)
+
+channel = OddSockets.channel(client, "room-42")
+:ok = OddSockets.Channel.subscribe(channel, fn _msg -> :ok end, %{enable_presence: true})
+
+# Send-path: enhanced actions over the live socket (client pid first)
+:ok = EnhancedFeatures.start_typing(client, "alice", "room-42")
+:ok = EnhancedFeatures.add_reaction(client, "msg-1", "room-42", ":thumbsup:", "alice", "Alice")
+:ok = EnhancedFeatures.thread_reply(client, "room-42", "msg-1", "Replying in the thread", "alice", "Alice")
+
+# Receive-path: broadcasts from other users on the channel
+receive do
+  {:oddsockets_event, {"user_typing", payload}} ->
+    IO.puts("#{payload["userId"]} is typing")
+
+  {:oddsockets_event, {"reaction_added", payload}} ->
+    IO.puts("#{payload["userId"]} reacted #{payload["emoji"]}")
+
+  {:oddsockets_event, {"thread_reply", _payload}} ->
+    IO.puts("New reply")
+end
+```
+
+Each area exposes functions on `OddSockets.EnhancedFeatures`; the worker broadcasts
+the paired events which surface on any process registered via
+`OddSockets.subscribe_events/1`. Query functions (`get_*`, `search_*`) block and
+return `{:ok, data}` (or `{:error, reason}`) with the worker response.
+
+| Area | Requests (`OddSockets.EnhancedFeatures.*`) | Broadcast events (`{:oddsockets_event, {..}}`) |
+|------|--------------------------------------------|------------------------------------------------|
+| Typing | `start_typing`, `stop_typing` | `user_typing`, `user_stopped_typing` |
+| Reactions | `add_reaction`, `remove_reaction`, `get_reactions` | `reaction_added`, `reaction_removed` |
+| Threads | `thread_reply`, `get_thread`, `subscribe_thread`, `follow_thread`, `mark_thread_read` | `thread_reply`, `thread_subscribed`, `thread_followed`, `thread_read_updated` |
+| Read receipts | `mark_read`, `mark_all_read`, `get_unread_counts` | `user_read`, `unread_count_updated`, `all_marked_read` |
+| Messages | `edit_message`, `delete_message`, `pin_message`, `unpin_message`, `get_pinned_messages`, `search_messages` | `message_edited`, `message_deleted`, `message_pinned`, `message_unpinned` |
+| Presence & status | `set_status`, `set_custom_status`, `set_dnd`, `get_user_presence` | `user_status_changed`, `custom_status_updated`, `dnd_status_changed` |
+| Channels | `create_channel`, `update_channel`, `archive_channel`, `invite_to_channel`, `join_channel`, `leave_channel` | `channel_created`, `channel_updated`, `user_invited`, `user_joined_channel`, `user_left_channel` |
+| DMs | `create_dm`, `send_dm`, `get_dm_conversations` | `dm_created`, `dm_received` |
+| Notifications | `subscribe_notifications`, `get_notifications`, `mark_notification_read`, `clear_notifications` | `notification`, `notification_read`, `notifications_cleared` |
+| Search | `search_messages`, `search_in_channel`, `search_by_user`, `filter_messages` | `{:ok, data}` results |
+
+For any worker event not wrapped above, it still surfaces as
+`{:oddsockets_event, {"<event>", payload}}` once you have called
+`OddSockets.subscribe_events/1` — all enhanced broadcasts are forwarded to the
+event stream.
+
 ## Configuration
 
 ### Environment Variables
