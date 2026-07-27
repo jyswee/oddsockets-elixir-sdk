@@ -638,6 +638,29 @@ defmodule OddSockets do
     end
   end
 
+  defp dispatch_worker_event("history", payload, state) do
+    # The worker emits "history" both as the explicit get_history RESPONSE
+    # (query:true) and as a fire-and-forget on-join snapshot (no query flag,
+    # ~10 msgs). Only the query:true response may complete a pending get_history
+    # waiter; the snapshot is delivered as a broadcast so it can't resolve
+    # get_history with the wrong data. BUG-2026-0727-0012.
+    if Map.get(payload, "query") == true do
+      channel = Map.get(payload, "channel")
+      key = "history:#{channel}"
+
+      case Map.pop(state.pending, key) do
+        {nil, _} ->
+          deliver_broadcast("history", payload, state)
+
+        {from, rest} ->
+          GenServer.reply(from, {:ok, adapt_response("history", payload)})
+          %{state | pending: rest}
+      end
+    else
+      deliver_broadcast("history", payload, state)
+    end
+  end
+
   defp dispatch_worker_event(event, payload, state) do
     channel = Map.get(payload, "channel")
     key = "#{event}:#{channel}"
