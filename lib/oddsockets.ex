@@ -31,6 +31,7 @@ defmodule OddSockets do
   @type config :: %{
           api_key: String.t(),
           user_id: String.t() | nil,
+          manager_url: String.t(),
           options: map()
         }
 
@@ -58,7 +59,6 @@ defmodule OddSockets do
 
   @max_reconnect_attempts 5
   @initial_reconnect_delay 1000
-  @manager_url "https://connect.oddsockets.tyga.network"
 
   ## Public API
 
@@ -69,6 +69,10 @@ defmodule OddSockets do
 
     * `:api_key` - Your OddSockets API key (required)
     * `:user_id` - User ID (defaults to API key's user)
+    * `:manager_url` - Manager endpoint to use. Falls back to
+      `config :oddsockets, manager_url: ...`, then `ODDSOCKETS_MANAGER_URL`,
+      then the public endpoint. Whatever resolves is used verbatim; raises
+      `ArgumentError` if it is not an absolute http(s) URL
     * `:options` - Additional connection options
     * `:auto_connect` - Whether to auto-connect (default: true)
 
@@ -80,6 +84,12 @@ defmodule OddSockets do
         api_key: "your-api-key",
         user_id: "user123",
         auto_connect: false
+      )
+
+      # Point at a self-hosted or QA manager
+      {:ok, client} = OddSockets.start_link(
+        api_key: "your-api-key",
+        manager_url: "https://manager.internal.example"
       )
 
   """
@@ -490,10 +500,16 @@ defmodule OddSockets do
 
   defp build_config(opts) do
     api_key = Keyword.fetch!(opts, :api_key)
-    
+
+    # Resolved once, up front: a bad manager URL is a configuration mistake and
+    # must stop the client from starting rather than reappear later disguised as
+    # a connection failure - or, worse, be replaced by the public endpoint.
+    manager_url = ManagerDiscovery.discover_manager_url!(Keyword.get(opts, :manager_url))
+
     %{
       api_key: api_key,
       user_id: Keyword.get(opts, :user_id),
+      manager_url: manager_url,
       options: Keyword.get(opts, :options, %{}),
       auto_connect: Keyword.get(opts, :auto_connect, true)
     }
@@ -574,8 +590,9 @@ defmodule OddSockets do
   end
 
   defp get_worker_assignment(state) do
-    # Step 1: Discover the optimal manager URL automatically (following JavaScript SDK pattern)
-    manager_url = ManagerDiscovery.discover_manager_url(state.config.api_key)
+    # The configured manager is the only endpoint contacted: if it is down the
+    # connection fails with that error rather than quietly landing elsewhere.
+    manager_url = state.config.manager_url
     url = "#{manager_url}/api/cluster/select-worker"
     
     params = %{
@@ -598,7 +615,7 @@ defmodule OddSockets do
               worker_id: worker_id,
               session: Map.get(response, "session"),
               client_identifier: state.client_identifier,
-              manager_url: manager_url  # Include discovered manager URL for debugging
+              manager_url: manager_url  # The manager actually used, for debugging
             }
             {:ok, assignment}
           

@@ -267,14 +267,30 @@ event stream.
 
 ## Configuration
 
-### Environment Variables
+### Manager URL
 
-You can set default configuration using environment variables:
+The client talks to a manager, which assigns it a worker. Point it at a
+self-hosted or QA manager with `:manager_url`:
 
-```bash
-export ODDSOCKETS_API_KEY="your-api-key"
-export ODDSOCKETS_MANAGER_URL="https://connect.oddsockets.tyga.network"
+```elixir
+{:ok, client} = OddSockets.start_link(
+  api_key: "your-api-key",
+  manager_url: "https://manager.internal.example"
+)
 ```
+
+Resolution order, highest first:
+
+1. `:manager_url` passed to `OddSockets.start_link/1`
+2. `config :oddsockets, manager_url: ...`
+3. the `ODDSOCKETS_MANAGER_URL` environment variable
+4. the public endpoint `https://connect.oddsockets.tyga.network`
+
+Whatever resolves is used verbatim. If it is unreachable the connection fails
+with that error - the SDK never quietly falls back to another manager, because
+that would send a QA or self-hosted deployment to production unnoticed. A value
+that is not an absolute `http://` or `https://` URL raises `ArgumentError` with
+`Invalid managerUrl: <value>` when the client starts.
 
 ### Application Configuration
 
@@ -283,7 +299,14 @@ Configure in your `config/config.exs`:
 ```elixir
 config :oddsockets,
   api_key: "your-api-key",
-  manager_url: "https://connect.oddsockets.tyga.network"
+  manager_url: "https://manager.internal.example"
+```
+
+### Environment Variables
+
+```bash
+export ODDSOCKETS_API_KEY="your-api-key"
+export ODDSOCKETS_MANAGER_URL="https://manager.internal.example"
 ```
 
 ## Error Handling
