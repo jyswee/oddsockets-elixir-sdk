@@ -32,6 +32,36 @@ end)
 {:ok, result} = OddSockets.Channel.publish(channel, %{text: "Hello World!"})
 ```
 
+## Token auth for game clients (`token_provider`)
+
+Game and app clients should never ship a static API key. Instead, mint a
+short-lived realtime token from your own backend and hand it to the SDK through a
+`token_provider` function. The client resolves a **fresh** token before every
+(re)connect, presents it on the manager/worker handshake in place of an API key,
+and silently refreshes it ahead of expiry.
+
+The function is zero-arity and may return the token binary itself or a map with
+`token` plus optional `expiresAt` (ISO-8601 or epoch) or `exp` (epoch seconds).
+No `api_key` is required when a `token_provider` is set.
+
+```elixir
+{:ok, client} = OddSockets.start_link(
+  token_provider: fn ->
+    # Your backend exchanges the player's session for a realtime token.
+    MyBackend.mint_realtime_token()
+    # => %{"token" => "...", "expiresAt" => "2026-01-01T00:00:00Z"}
+  end,
+  user_id: "player-42"
+)
+
+# Fired after each silent pre-expiry refresh (via subscribe_events/1):
+:ok = OddSockets.subscribe_events(client)
+# receive: {:oddsockets_event, {:token_refreshed, %{expires_at: epoch_ms}}}
+```
+
+Tune how early the token refreshes with `token_refresh_lead_ms: 120_000`
+(default two minutes).
+
 ## Features
 
 - **Automatic Manager Discovery**: Connects to the optimal manager endpoint

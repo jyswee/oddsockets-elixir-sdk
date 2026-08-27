@@ -29,7 +29,9 @@ defmodule OddSockets do
   alias OddSockets.{Channel, ManagerDiscovery, MessageSizeValidator, Types, Error}
 
   @type config :: %{
-          api_key: String.t(),
+          api_key: String.t() | nil,
+          token_provider: (-> String.t() | map()) | nil,
+          token_refresh_lead_ms: non_neg_integer(),
           user_id: String.t() | nil,
           manager_url: String.t(),
           options: map()
@@ -54,7 +56,10 @@ defmodule OddSockets do
           connect_from: GenServer.from() | nil,
           connect_timer: reference() | nil,
           assignment: map() | nil,
-          intentional_disconnect: boolean()
+          intentional_disconnect: boolean(),
+          current_token: String.t() | nil,
+          token_expires_at: non_neg_integer() | nil,
+          token_refresh_timer: reference() | nil
         }
 
   @max_reconnect_attempts 5
@@ -67,7 +72,17 @@ defmodule OddSockets do
 
   ## Options
 
-    * `:api_key` - Your OddSockets API key (required)
+    * `:api_key` - Your OddSockets API key (required unless `:token_provider`
+      is supplied)
+    * `:token_provider` - Zero-arity function that mints a short-lived realtime
+      token. When set, the client resolves a **fresh** token before every
+      (re)connect, presents it on the manager/worker handshake in place of an
+      API key, and silently refreshes it ahead of expiry. The function may
+      return the token binary or a map with `:token`/"token" plus optional
+      `:expires_at`/"expiresAt" (ISO-8601 or epoch) or `:exp`/"exp" (epoch
+      seconds)
+    * `:token_refresh_lead_ms` - How early (ms) to refresh the token ahead of
+      its expiry (default: 120_000)
     * `:user_id` - User ID (defaults to API key's user)
     * `:manager_url` - Manager endpoint to use. Falls back to
       `config :oddsockets, manager_url: ...`, then `ODDSOCKETS_MANAGER_URL`,
@@ -256,7 +271,10 @@ defmodule OddSockets do
       connect_from: nil,
       connect_timer: nil,
       assignment: nil,
-      intentional_disconnect: false
+      intentional_disconnect: false,
+      current_token: nil,
+      token_expires_at: nil,
+      token_refresh_timer: nil
     }
 
     # Auto-connect by default
@@ -423,7 +441,25 @@ defmodule OddSockets do
 
     if state.connect_from, do: GenServer.reply(state.connect_from, :ok)
 
-    {:noreply, %{new_state | connect_from: nil}}
+    {:noreply, schedule_token_refresh(%{new_state | connect_from: nil})}
+  end
+
+  # Silent pre-expiry token refresh (token mode only).
+  def handle_info(:token_refresh, state) do
+    if token_mode?(state) do
+      case resolve_token(state) do
+        {:ok, new_state} ->
+          broadcast_event(:token_refreshed, %{expires_at: new_state.token_expires_at}, new_state)
+          {:noreply, schedule_token_refresh(%{new_state | token_refresh_timer: nil})}
+
+        {:error, reason} ->
+          Logger.warning("OddSockets token refresh failed: #{inspect(reason)}")
+          broadcast_event(:error, {:token_refresh_failed, reason}, state)
+          {:noreply, %{state | token_refresh_timer: nil}}
+      end
+    else
+      {:noreply, state}
+    end
   end
 
   # Socket.IO CONNECT_ERROR during the handshake.
@@ -499,7 +535,19 @@ defmodule OddSockets do
   ## Private Functions
 
   defp build_config(opts) do
-    api_key = Keyword.fetch!(opts, :api_key)
+    api_key = Keyword.get(opts, :api_key)
+    token_provider = Keyword.get(opts, :token_provider)
+
+    # A token_provider stands in for a static API key: game/app clients mint a
+    # short-lived token instead of shipping a key, so an api_key is only
+    # required when no provider is configured.
+    if is_nil(api_key) and is_nil(token_provider) do
+      raise ArgumentError, "either :api_key or :token_provider is required"
+    end
+
+    if token_provider != nil and not is_function(token_provider, 0) do
+      raise ArgumentError, ":token_provider must be a zero-arity function"
+    end
 
     # Resolved once, up front: a bad manager URL is a configuration mistake and
     # must stop the client from starting rather than reappear later disguised as
@@ -508,6 +556,8 @@ defmodule OddSockets do
 
     %{
       api_key: api_key,
+      token_provider: token_provider,
+      token_refresh_lead_ms: Keyword.get(opts, :token_refresh_lead_ms, 120_000),
       user_id: Keyword.get(opts, :user_id),
       manager_url: manager_url,
       options: Keyword.get(opts, :options, %{}),
@@ -522,12 +572,16 @@ defmodule OddSockets do
     state = %{state | connection_state: :connecting, intentional_disconnect: false}
     broadcast_event(:connecting, state)
 
-    with {:ok, assignment} <- get_worker_assignment(state),
+    # Step 0 (token mode): resolve a FRESH token before every (re)connect so
+    # the manager and worker handshakes never present an expired credential.
+    with {:ok, state} <- maybe_resolve_token(state),
+         {:ok, assignment} <- get_worker_assignment(state),
          ws_url = build_ws_url(assignment.url),
          {:ok, socket} <-
            OddSockets.Socket.start(ws_url, %{
              owner: self(),
              api_key: state.config.api_key,
+             token: state.current_token,
              user_id: state.config.user_id || state.client_identifier
            }) do
       ref = Process.monitor(socket)
@@ -569,6 +623,8 @@ defmodule OddSockets do
       OddSockets.Socket.close(state.socket)
     end
 
+    if state.token_refresh_timer, do: Process.cancel_timer(state.token_refresh_timer)
+
     # Fail any in-flight requests so callers do not hang.
     Enum.each(state.pending, fn {_key, from} ->
       GenServer.reply(from, {:error, :disconnected})
@@ -582,7 +638,8 @@ defmodule OddSockets do
         worker_url: nil,
         worker_id: nil,
         pending: %{},
-        intentional_disconnect: true
+        intentional_disconnect: true,
+        token_refresh_timer: nil
     }
 
     broadcast_event(:disconnected, new_state)
@@ -595,11 +652,17 @@ defmodule OddSockets do
     manager_url = state.config.manager_url
     url = "#{manager_url}/api/cluster/select-worker"
     
-    params = %{
-      "apiKey" => state.config.api_key,
-      "userId" => state.config.user_id || state.client_identifier,
-      "clientIdentifier" => state.client_identifier
-    }
+    credential =
+      if token_mode?(state),
+        do: {"token", state.current_token},
+        else: {"apiKey", state.config.api_key}
+
+    params =
+      Map.new([
+        credential,
+        {"userId", state.config.user_id || state.client_identifier},
+        {"clientIdentifier", state.client_identifier}
+      ])
     
     headers = [
       {"User-Agent", "OddSockets-Elixir-SDK/1.0.0"},
@@ -847,8 +910,92 @@ defmodule OddSockets do
 
   defp generate_client_identifier(config) do
     base_id = config.user_id || "default"
-    api_key_hash = hash_string(config.api_key)
+    # In token mode there is no api_key; seed the stickiness hash instead.
+    api_key_hash = hash_string(config.api_key || "token-client")
     "#{api_key_hash}_#{base_id}"
+  end
+
+  ## Token-mode helpers (FEAT-0040)
+
+  defp token_mode?(state), do: state.config[:token_provider] != nil
+
+  defp maybe_resolve_token(state) do
+    if token_mode?(state), do: resolve_token(state), else: {:ok, state}
+  end
+
+  # Calls the configured token_provider and stores the fresh token + expiry.
+  defp resolve_token(state) do
+    minted =
+      try do
+        {:ok, state.config.token_provider.()}
+      rescue
+        e -> {:error, {:token_provider_failed, Exception.message(e)}}
+      end
+
+    with {:ok, raw} <- minted,
+         {token, expires_at} <- extract_token(raw),
+         false <- token in [nil, ""] do
+      expires_at = expires_at || expiry_from_jwt(token)
+      {:ok, %{state | current_token: token, token_expires_at: expires_at}}
+    else
+      true -> {:error, :empty_token}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Accepts the token binary itself or a map (atom or string keys) with
+  # token / expiresAt (ISO-8601 or epoch) / exp (epoch seconds).
+  defp extract_token(token) when is_binary(token), do: {token, nil}
+
+  defp extract_token(%{} = raw) do
+    token = raw[:token] || raw["token"]
+    expires_at = raw[:expires_at] || raw["expiresAt"] || raw[:expiresAt]
+    exp = raw[:exp] || raw["exp"]
+
+    ms =
+      cond do
+        is_integer(exp) -> exp * 1000
+        is_number(expires_at) and expires_at < 1.0e12 -> trunc(expires_at * 1000)
+        is_number(expires_at) -> trunc(expires_at)
+        is_binary(expires_at) -> parse_iso_ms(expires_at)
+        true -> nil
+      end
+
+    {token, ms}
+  end
+
+  defp extract_token(_), do: {nil, nil}
+
+  defp parse_iso_ms(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> DateTime.to_unix(dt, :millisecond)
+      _ -> nil
+    end
+  end
+
+  # Best-effort expiry from the JWT payload's exp claim (epoch seconds).
+  defp expiry_from_jwt(token) do
+    with [_, payload, _] <- String.split(token, "."),
+         {:ok, json} <- Base.url_decode64(payload, padding: false),
+         {:ok, %{"exp" => exp}} when is_integer(exp) <- Jason.decode(json) do
+      exp * 1000
+    else
+      _ -> nil
+    end
+  end
+
+  # Arms (or re-arms) the silent pre-expiry refresh timer.
+  defp schedule_token_refresh(state) do
+    if state.token_refresh_timer, do: Process.cancel_timer(state.token_refresh_timer)
+
+    case {token_mode?(state), state.token_expires_at} do
+      {true, expires_at} when is_integer(expires_at) ->
+        delay = max(expires_at - System.system_time(:millisecond) - state.config.token_refresh_lead_ms, 0)
+        %{state | token_refresh_timer: Process.send_after(self(), :token_refresh, delay)}
+
+      _ ->
+        %{state | token_refresh_timer: nil}
+    end
   end
 
   defp hash_string(str) do
