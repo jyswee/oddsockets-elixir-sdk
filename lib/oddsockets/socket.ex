@@ -23,9 +23,10 @@ defmodule OddSockets.Socket do
   @doc """
   Open a Socket.IO connection to `url`.
 
-  `opts` must contain `:owner` (pid to receive decoded frames), `:api_key`, and
-  `:user_id`. The socket is started unlinked so the owner controls its lifecycle
-  via a monitor.
+  `opts` must contain `:owner` (pid to receive decoded frames), `:user_id`, and
+  either `:api_key` or `:token` (a minted short-lived realtime token, which is
+  presented on the handshake in place of an API key). The socket is started
+  unlinked so the owner controls its lifecycle via a monitor.
   """
   @spec start(String.t(), map()) :: {:ok, pid()} | {:error, term()}
   def start(url, opts) do
@@ -54,8 +55,15 @@ defmodule OddSockets.Socket do
   def handle_frame({:text, msg}, state) do
     cond do
       String.starts_with?(msg, "0") ->
-        # Engine.IO OPEN -> Socket.IO CONNECT carrying auth credentials.
-        auth = Jason.encode!(%{"apiKey" => state.api_key, "userId" => state.user_id})
+        # Engine.IO OPEN -> Socket.IO CONNECT carrying auth credentials. A
+        # minted short-lived token (token mode) replaces the static API key.
+        credentials =
+          case Map.get(state, :token) do
+            nil -> %{"apiKey" => state.api_key}
+            token -> %{"token" => token}
+          end
+
+        auth = Jason.encode!(Map.put(credentials, "userId", state.user_id))
         {:reply, {:text, "40" <> auth}, state}
 
       msg == "2" ->
