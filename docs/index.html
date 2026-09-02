@@ -697,6 +697,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a href="#challenges" class="nav-link">
+                            <i class="fas fa-trophy nav-icon"></i>
+                            Challenges &amp; Leaderboards
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a href="#performance" class="nav-link">
                             <i class="fas fa-chart-line nav-icon"></i>
                             Performance
@@ -1115,6 +1121,74 @@ end</code></pre>
                     <li><strong>Search</strong> &mdash; <code>search_messages</code>, <code>search_in_channel</code>, <code>search_by_user</code>, <code>filter_messages</code> &rarr; <code>{:ok, data}</code> results</li>
                 </ul>
                 <p>For any worker event not wrapped above, it still surfaces as <code>{:oddsockets_event, {"&lt;event&gt;", payload}}</code> once you have called <code>OddSockets.subscribe_events/1</code> &mdash; all enhanced broadcasts are forwarded to the event stream.</p>
+            </section>
+
+            <section id="challenges" class="section">
+                <h2 class="section-title">
+                    <i class="fas fa-trophy"></i>
+                    Challenges &amp; Leaderboards
+                </h2>
+
+                <p>Challenges, leaderboards and achievements build on the same live socket. The send side lives on the <code>OddSockets.EnhancedFeatures</code> surface (the client pid is always the first argument); request/query functions block and resolve with the worker's reply as <code>{:ok, data}</code>, while progress and achievement calls are fire-and-forget. Inbound broadcasts arrive on the client event surface &mdash; subscribe with <code>OddSockets.subscribe_events/1</code> and match <code>{:oddsockets_event, {"&lt;event&gt;", payload}}</code> in your mailbox.</p>
+
+                <h3 class="section-subtitle">Run a challenge</h3>
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="code-lang">elixir</span>
+                        <button class="code-copy" onclick="copyCode(this)">
+                            <i class="fas fa-copy"></i>
+                            Copy
+                        </button>
+                    </div>
+                    <pre><code class="language-elixir">alias OddSockets.EnhancedFeatures
+
+# Create a ranked challenge (ack: challenge_create_success)
+{:ok, _} = EnhancedFeatures.create_challenge(client, %{challengeId: "daily-sprint", metric: "score", ranked?: true, channel: "room-42"})
+
+# Report progress toward the metric (fire-and-forget)
+:ok = EnhancedFeatures.report_progress(client, %{challengeId: "daily-sprint", value: 1200})
+
+# Pull server-ordered standings (awaited; ack: challenge_standings_success)
+{:ok, standings} = EnhancedFeatures.get_standings(client, %{challengeId: "daily-sprint", limit: 10})
+
+# Finalize with an outcome (ack: challenge_complete_success)
+{:ok, _} = EnhancedFeatures.complete_challenge(client, %{challengeId: "daily-sprint", outcome: "completed"})</code></pre>
+                </div>
+
+                <h3 class="section-subtitle">Send-path functions</h3>
+                <p>Every function lives on <code>OddSockets.EnhancedFeatures</code> with the client pid as the first argument. Request/query calls block until the ack arrives and return <code>{:ok, data}</code>; fire-and-forget calls return <code>:ok</code>.</p>
+                <ul>
+                    <li><strong><code>create_challenge</code></strong> &mdash; create a challenge/leaderboard. Ack <code>challenge_create_success</code>.</li>
+                    <li><strong><code>report_progress</code></strong> &mdash; fire-and-forget metric progress. (no ack)</li>
+                    <li><strong><code>complete_challenge</code></strong> &mdash; finalize with an <code>outcome</code>. Ack <code>challenge_complete_success</code>.</li>
+                    <li><strong><code>unlock_achievement</code></strong> &mdash; fire-and-forget; pass <code>percentComplete</code> (0&ndash;100). (no ack)</li>
+                    <li><strong><code>get_standings</code></strong> &mdash; request top-N + caller rank. Ack <code>challenge_standings_success</code>.</li>
+                    <li><strong><code>get_achievements</code></strong> &mdash; query achievement state. Ack <code>achievement_state</code>.</li>
+                    <li><strong><code>send_challenge_invite</code></strong> &mdash; directed invite to another user. Ack <code>challenge_invite_success</code>.</li>
+                    <li><strong><code>reply_challenge_invite</code></strong> &mdash; accept/decline an invite. Ack <code>challenge_reply_success</code>.</li>
+                    <li><strong><code>cancel_challenge_invite</code></strong> &mdash; cancel a sent invite. Ack <code>challenge_invite_cancel_success</code>.</li>
+                    <li><strong><code>get_challenge_invites</code></strong> &mdash; list pending invites. Ack <code>challenge_invites</code>.</li>
+                </ul>
+
+                <h3 class="section-subtitle">Outcome vocabulary</h3>
+                <p>The <code>outcome</code> passed to <code>complete_challenge</code> is one of:</p>
+                <ul>
+                    <li><strong><code>completed</code></strong> &mdash; win (rank 1)</li>
+                    <li><strong><code>failed</code></strong> &mdash; loss</li>
+                    <li><strong><code>tied</code></strong> &mdash; draw</li>
+                    <li><strong><code>conceded</code></strong> &mdash; resign / concede</li>
+                    <li><strong><code>expired</code></strong> &mdash; timed out</li>
+                </ul>
+
+                <h3 class="section-subtitle">Progressive achievements</h3>
+                <p><code>unlock_achievement</code> always emits the wire event <code>achievement_unlock</code>; the worker is authoritative and derives the outbound broadcast from <code>percentComplete</code>. A value <code>&lt; 100</code> broadcasts <code>achievement_progress</code> (status <code>in_progress</code>); <code>&gt;= 100</code> or an omitted value broadcasts <code>achievement_unlock</code> (status <code>unlocked</code>). You never emit <code>achievement_progress</code> yourself.</p>
+
+                <h3 class="section-subtitle">Inbound events</h3>
+                <p>Subscribe with <code>OddSockets.subscribe_events/1</code> and match <code>{:oddsockets_event, {"&lt;event&gt;", payload}}</code> in your mailbox.</p>
+                <ul>
+                    <li><strong>Room broadcasts</strong> &mdash; <code>challenge_progress</code>, <code>leaderboard_rank_change</code>, <code>challenge_complete</code>, <code>achievement_unlock</code>, <code>achievement_progress</code></li>
+                    <li><strong>Directed (per-user)</strong> &mdash; <code>challenge_invited</code>, <code>challenge_reply_received</code>, <code>challenge_invite_cancelled</code></li>
+                </ul>
             </section>
 
             <section id="performance" class="section">
