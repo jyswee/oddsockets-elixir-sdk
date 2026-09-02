@@ -749,6 +749,9 @@ defmodule OddSockets do
       {nil, _} ->
         # Not a correlated channel response - treat as an enhanced (Slack-like)
         # broadcast: user_typing, reaction_added, thread_reply, notifications,
+        # challenge_progress, leaderboard_rank_change, challenge_complete,
+        # achievement_unlock, achievement_progress, challenge_invited,
+        # challenge_reply_received, challenge_invite_cancelled,
         # etc. Fire any one-shot `once/3` listeners and surface it on the public
         # event stream for `subscribe_events/1` consumers.
         deliver_broadcast(event, payload, state)

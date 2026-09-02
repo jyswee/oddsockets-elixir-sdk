@@ -436,7 +436,138 @@ defmodule OddSockets.EnhancedFeatures do
     emit_with_response(client, "search_by_user", params, "user_search_results")
   end
 
+  # ==================== CHALLENGE / LEADERBOARD / ACHIEVEMENT EVENTS ====================
+
+  @doc """
+  Create a challenge (optionally ranked with a leaderboard).
+
+  `params` keys: `challengeId`, `metric`, `ranked?`, `channel?`,
+  `resultWebhookUrl?`, `standingsUrl?`. Returns the server ack.
+  """
+  def create_challenge(client, params) do
+    emit_with_ack(client, "challenge_create", params, "challenge_create_success")
+  end
+
+  @doc """
+  Report progress toward a challenge. Fire-and-forget; the worker echoes a
+  `challenge_progress` broadcast and, for ranked challenges,
+  `leaderboard_rank_change`.
+
+  `params` keys: `challengeId`, `value`, `metric?`, `eventId?`, `cohort?`,
+  `platform?`, `channel?`.
+  """
+  def report_progress(client, params) do
+    OddSockets.emit(client, "challenge_progress", params)
+  end
+
+  @doc """
+  Complete a challenge.
+
+  `params` keys: `challengeId`, `outcome`, `eventId?`, `reward?` where `outcome`
+  is one of `completed | failed | expired | conceded | tied`. Returns the ack.
+  """
+  def complete_challenge(client, params) do
+    emit_with_ack(client, "challenge_complete", params, "challenge_complete_success")
+  end
+
+  @doc """
+  Report achievement progress or unlock. Fire-and-forget. Pass `percentComplete`
+  (0-100): `<100` broadcasts `achievement_progress`; `>=100` or omitted broadcasts
+  `achievement_unlock`.
+
+  `params` keys: `achievementId`, `name?`, `tier?`, `percentComplete?`,
+  `challengeId?`, `channel?`.
+  """
+  def unlock_achievement(client, params) do
+    OddSockets.emit(client, "achievement_unlock", params)
+  end
+
+  @doc """
+  Fetch server-ordered leaderboard standings for a ranked challenge.
+
+  `params` keys: `challengeId`, `limit?` (default 20), `offset?` (default 0).
+  Returns the standings ack.
+  """
+  def get_standings(client, params) do
+    params = params |> Map.put_new(:limit, 20) |> Map.put_new(:offset, 0)
+    emit_with_ack(client, "challenge_standings", params, "challenge_standings_success")
+  end
+
+  @doc """
+  Query persisted achievement state for the connected player.
+
+  `params` keys: `achievementId?`. Returns the achievement state.
+  """
+  def get_achievements(client, params \\ %{}) do
+    emit_with_ack(client, "achievement_query", params, "achievement_state")
+  end
+
+  @doc """
+  Send a directed 1:1 challenge/invite to a specific player.
+
+  `params` keys: `toUserId`, `type?` (default `match`), `payload?` (<=8KB),
+  `ttl?` (default 300), `channel?`, `inviteId?`. Returns the invite ack.
+  """
+  def send_challenge_invite(client, params) do
+    params = params |> Map.put_new(:type, "match") |> Map.put_new(:ttl, 300)
+    emit_with_ack(client, "challenge_invite", params, "challenge_invite_success")
+  end
+
+  @doc """
+  Accept or decline a received invite.
+
+  `params` keys: `inviteId`, `accept`, `reason?`. Returns the reply ack.
+  """
+  def reply_challenge_invite(client, params) do
+    emit_with_ack(client, "challenge_reply", params, "challenge_reply_success")
+  end
+
+  @doc """
+  Cancel a pending invite you sent.
+
+  `params` keys: `inviteId`. Returns the cancel ack.
+  """
+  def cancel_challenge_invite(client, params) do
+    emit_with_ack(client, "challenge_invite_cancel", params, "challenge_invite_cancel_success")
+  end
+
+  @doc """
+  Pull the connected player's still-pending invites (e.g. on reconnect).
+
+  Returns `{invites: [...]}`.
+  """
+  def get_challenge_invites(client) do
+    emit_with_ack(client, "challenge_invites_query", %{}, "challenge_invites")
+  end
+
   # ==================== PRIVATE FUNCTIONS ====================
+
+  # Like emit_with_response but also awaits a server "error" broadcast, failing
+  # the call only when the error's "event" matches the emitted event (mirrors the
+  # JS `socket.once('error', ...)` guard).
+  defp emit_with_ack(client, event, params, response_event) do
+    task = Task.async(fn ->
+      receive do
+        {:response, data} -> {:ok, data}
+        {:error, message} -> {:error, message}
+      after
+        @timeout -> {:error, :timeout}
+      end
+    end)
+
+    OddSockets.once(client, response_event, fn data ->
+      send(task.pid, {:response, data})
+    end)
+
+    OddSockets.once(client, "error", fn err ->
+      if Map.get(err, "event") == event do
+        send(task.pid, {:error, Map.get(err, "message")})
+      end
+    end)
+
+    OddSockets.emit(client, event, params)
+    Task.await(task, @timeout + 1000)
+  end
 
   defp emit_with_response(client, event, params, response_event) do
     task = Task.async(fn ->
