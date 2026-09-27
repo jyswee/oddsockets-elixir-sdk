@@ -2,13 +2,13 @@ defmodule OddSockets.MessageSizeValidator do
   @moduledoc """
   Message size validation utilities.
 
-  Validates message sizes against industry standard limits (matches PubNub)
+  Validates message sizes against the platform limit
   for reliable real-time messaging.
   """
 
   alias OddSockets.Error
 
-  # Message size limits (industry standard - matches PubNub)
+  # Platform message size limit, enforced server-side
   @max_message_size 32768  # 32KB in bytes
   @max_message_size_kb 32
 
@@ -49,7 +49,7 @@ defmodule OddSockets.MessageSizeValidator do
       
       raise Error, """
       Message size (#{size_kb}KB) exceeds maximum allowed size of #{@max_message_size_kb}KB. \
-      This limit matches industry standards (PubNub, Socket.IO) for reliable real-time messaging.
+      Split the payload, or publish a reference to it instead.
       """
     end
     

@@ -137,7 +137,7 @@ defmodule OddSocketsDemo do
   defp print_signup_instructions do
     IO.puts("ODDSOCKETS_API_KEY is not set.")
     IO.puts("")
-    IO.puts("Get a free API key (no card required):")
+    IO.puts("Get an API key (two-step email verification, no card for the first 48h):")
     IO.puts("  1. curl -X POST https://oddsockets.com/api/agent-signup \\")
     IO.puts("       -H \"Content-Type: application/json\" \\")
     IO.puts("       -d '{\"email\":\"you@example.com\",\"agentName\":\"my-agent\",\"platform\":\"elixir\"}'")
