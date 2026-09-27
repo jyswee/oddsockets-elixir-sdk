@@ -82,6 +82,16 @@ defmodule OddSockets.Types do
           metadata: map() | nil
         }
 
+  @type usage_stats :: %{
+          mau: number() | nil,
+          dau: number() | nil,
+          total_messages: number() | nil,
+          error_rate: number() | nil,
+          owner_scope: String.t() | nil,
+          detail: String.t() | nil,
+          timestamp: String.t() | nil
+        }
+
   @type client_event ::
           :connecting
           | :connected

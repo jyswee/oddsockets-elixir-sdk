@@ -175,6 +175,29 @@ defmodule OddSockets do
   end
 
   @doc """
+  Fetch this tenant's headline usage analytics from the manager.
+
+  Returns the MAU / DAU / total-message / error-rate tiles for the owner scope
+  behind the client's API key. **Requires an api_key** - keyless/token-only
+  clients have no owner scope to query and get `{:error, :requires_api_key}`.
+
+  Each tile is a number OR `nil`: a metric that is not live yet comes back as
+  `nil` (never a fabricated zero) so callers can render an em-dash rather than
+  implying real activity.
+
+  ## Examples
+
+      {:ok, stats} = OddSockets.get_usage_stats(client)
+      # => %{mau: 42, dau: 7, total_messages: 1234, error_rate: nil,
+      #      owner_scope: "tenant:...", detail: nil, timestamp: "2026-09-04T..."}
+
+  """
+  @spec get_usage_stats(pid()) :: {:ok, Types.usage_stats()} | {:error, term()}
+  def get_usage_stats(client) do
+    GenServer.call(client, :get_usage_stats, 15_000)
+  end
+
+  @doc """
   Publish multiple messages at once.
 
   ## Examples
@@ -377,6 +400,10 @@ defmodule OddSockets do
 
   def handle_call(:get_session_info, _from, state) do
     {:reply, state.session_info, state}
+  end
+
+  def handle_call(:get_usage_stats, _from, state) do
+    {:reply, fetch_usage_stats(state), state}
   end
 
   def handle_call({:publish_bulk, messages}, _from, state) do
@@ -696,6 +723,58 @@ defmodule OddSockets do
           {:error, reason}
         end
     end
+  end
+
+  # Fetches the tenant usage tiles from the manager. Requires an API key: token
+  # clients have no owner scope so they get {:error, :requires_api_key} without
+  # a network round-trip. Tiles are returned verbatim (nil stays nil) so a not-
+  # yet-live metric is never coerced to a misleading 0.
+  defp fetch_usage_stats(state) do
+    cond do
+      token_mode?(state) or is_nil(state.config.api_key) ->
+        {:error, :requires_api_key}
+
+      true ->
+        # Same manager endpoint used for worker selection.
+        url = "#{state.config.manager_url}/api/tenant/usage"
+
+        headers = [
+          {"X-API-Key", state.config.api_key},
+          {"User-Agent", "OddSockets-Elixir-SDK/1.0.0"}
+        ]
+
+        case HTTPoison.get(url, headers, timeout: 10_000, recv_timeout: 10_000) do
+          {:ok, %HTTPoison.Response{status_code: 200, body: body}} ->
+            case Jason.decode(body) do
+              {:ok, data} -> {:ok, adapt_usage_stats(data)}
+              {:error, _} -> {:error, :invalid_response}
+            end
+
+          {:ok, %HTTPoison.Response{status_code: status}} ->
+            {:error, {:http_error, status}}
+
+          {:error, %HTTPoison.Error{reason: reason}} ->
+            if reason in [:econnrefused, :nxdomain],
+              do: {:error, :manager_offline},
+              else: {:error, reason}
+        end
+    end
+  end
+
+  # Maps the manager's {ownerScope, tiles: {...}, detail, timestamp} JSON onto
+  # an idiomatic snake_case map. Missing tiles stay nil - never 0.
+  defp adapt_usage_stats(data) do
+    tiles = Map.get(data, "tiles") || %{}
+
+    %{
+      mau: Map.get(tiles, "mau"),
+      dau: Map.get(tiles, "dau"),
+      total_messages: Map.get(tiles, "totalMessages"),
+      error_rate: Map.get(tiles, "errorRate"),
+      owner_scope: Map.get(data, "ownerScope"),
+      detail: Map.get(data, "detail"),
+      timestamp: Map.get(data, "timestamp")
+    }
   end
 
   # Routes a decoded worker event to the correct place: `message` envelopes go
