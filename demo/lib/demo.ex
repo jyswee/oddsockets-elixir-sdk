@@ -38,9 +38,6 @@ defmodule OddSocketsDemo do
     :ok = OddSockets.connect(subscriber)
     :ok = OddSockets.connect(publisher)
 
-    IO.puts("[alice] worker #{worker_id(subscriber)}")
-    IO.puts("[bob]   worker #{worker_id(publisher)}")
-
     IO.puts(
       "[connect] alice = #{OddSockets.get_state(subscriber)}, " <>
         "bob = #{OddSockets.get_state(publisher)}"
@@ -111,13 +108,6 @@ defmodule OddSocketsDemo do
   defp own_message?(%{"message" => inner}, nonce) when is_map(inner), do: own_message?(inner, nonce)
   defp own_message?(%{"data" => inner}, nonce) when is_map(inner), do: own_message?(inner, nonce)
   defp own_message?(_other, _nonce), do: false
-
-  defp worker_id(client) do
-    case OddSockets.get_worker_info(client) do
-      %{worker_id: id} -> id
-      _ -> "unknown"
-    end
-  end
 
   defp get_api_key! do
     case System.get_env("ODDSOCKETS_API_KEY") do

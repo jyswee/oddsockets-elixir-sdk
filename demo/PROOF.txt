@@ -17,8 +17,6 @@
 # Process exit code: 0 (0 = cross-client round-trip verified)
 
 [connect] connecting both clients...
-[alice] worker [instance]
-[bob]   worker [instance]
 [connect] alice = connected, bob = connected
 [alice] subscribed to demo-610597 (presence on)
 [bob] published, messageId = 36401ebb-c78a-4617-aa0c-1cf45cdfc403
@@ -42,8 +40,6 @@ OK - cross-client round-trip verified
 # Process exit code: 0
 
 [connect] connecting both clients...
-[alice] worker [instance]
-[bob]   worker [instance]
 [connect] alice = connected, bob = connected
 [both] subscribed to enh-b4b0f1d4a0
 [bob] EnhancedFeatures.start_typing(bob) ...

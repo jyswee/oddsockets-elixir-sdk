@@ -24,9 +24,9 @@ defmodule OddSocketsChallengeRegress do
     challenge_id = "chal-" <> rand()
     achievement_id = "ach-" <> rand()
 
-    # userIds are overridable so we can force alice/bob onto DIFFERENT workers
-    # (proving cross-worker fan-out via the shared Redis adapter) while keeping
-    # identical shared-key owner scope. Defaults stay alice/bob.
+    # userIds are overridable so we can force alice/bob onto DIFFERENT serving
+    # instances (proving cross-instance fan-out) while keeping identical
+    # shared-key owner scope. Defaults stay alice/bob.
     alice_id = System.get_env("ALICE_ID") || "alice"
     bob_id = System.get_env("BOB_ID") || "bob"
 
@@ -55,9 +55,15 @@ defmodule OddSocketsChallengeRegress do
 
     aw = worker_id(alice)
     bw = worker_id(bob)
-    IO.puts("[alice] worker #{aw}  state=#{OddSockets.get_state(alice)}")
-    IO.puts("[bob]   worker #{bw}  state=#{OddSockets.get_state(bob)}")
-    IO.puts("[workers] alice=#{aw} bob=#{bw} #{if aw != bw, do: "(CROSS-WORKER)", else: "(same worker)"}")
+    IO.puts("[alice] state=#{OddSockets.get_state(alice)}")
+    IO.puts("[bob]   state=#{OddSockets.get_state(bob)}")
+
+    # The two assignments are compared internally; only the RELATION is printed,
+    # which is what the cross-instance fan-out claim actually rests on.
+    IO.puts(
+      "[workers] alice and bob were assigned " <>
+        if(aw != bw, do: "different instances (CROSS-WORKER)", else: "the same instance")
+    )
 
     # Both join 'lobby' so room broadcasts reach both.
     _ = OddSockets.channel(alice, @channel)
@@ -280,7 +286,7 @@ defmodule OddSocketsChallengeRegress do
     fails = Enum.count(all, fn {_, s, _} -> s == :fail end)
     total = length(all)
     IO.puts("\n==== RESULT: #{total - fails}/#{total} assertions passed ====")
-    IO.puts("workers: alice=#{aw} bob=#{bw}#{if aw != bw, do: " CROSS-WORKER", else: ""}")
+    IO.puts("workers: #{if aw != bw, do: "different instances CROSS-WORKER", else: "same instance"}")
 
     if fails == 0 do
       IO.puts("OK - challenge lifecycle two-client regression PASSED")

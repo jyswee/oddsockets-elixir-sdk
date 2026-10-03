@@ -30,8 +30,6 @@ defmodule OddSocketsEnhancedRegress do
     :ok = OddSockets.connect(alice)
     :ok = OddSockets.connect(bob)
 
-    IO.puts("[alice] worker #{worker_id(alice)}")
-    IO.puts("[bob]   worker #{worker_id(bob)}")
     IO.puts("[connect] alice = #{OddSockets.get_state(alice)}, bob = #{OddSockets.get_state(bob)}")
 
     # Enhanced broadcasts must surface on alice's PUBLIC event stream.
@@ -91,13 +89,6 @@ defmodule OddSocketsEnhancedRegress do
       @timeout_ms ->
         IO.puts("\nTIMEOUT - enhanced broadcast not received within #{div(@timeout_ms, 1000)}s (typing=#{got_typing} reaction=#{got_reaction})")
         System.halt(2)
-    end
-  end
-
-  defp worker_id(client) do
-    case OddSockets.get_worker_info(client) do
-      %{worker_id: id} -> id
-      _ -> "unknown"
     end
   end
 
